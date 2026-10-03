@@ -47,6 +47,7 @@ public class VideoComposition {
     private boolean isVideo = true;
     private boolean audioEnabled = false;
     private double audioVolume = 1.0;
+    private double rate = 1.0;
 
     public Item() {
     }
@@ -103,6 +104,10 @@ public class VideoComposition {
 
     public double getAudioVolume() {
       return audioVolume;
+    }
+
+    public double getRate() {
+      return rate;
     }
   }
 }

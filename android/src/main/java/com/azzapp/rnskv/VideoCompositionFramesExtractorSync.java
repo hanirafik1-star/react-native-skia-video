@@ -165,7 +165,15 @@ public class VideoCompositionFramesExtractorSync {
       long itemCurrentTimeUs = itemTime;
       long startTimeUs = TimeHelpers.secToUs(item.getStartTime());
       long compositionStartTimeUs = TimeHelpers.secToUs(item.getCompositionStartTime());
-      if (itemCurrentTimeUs - startTimeUs < decodingTimeUs - compositionStartTimeUs) {
+      // Must stay identical to the source-time calculation in
+      // VideoCompositionItemDecoder.render(). The item is ready once the
+      // decoder has produced a frame at or past the source time the renderer is
+      // about to ask for; if this gate were stricter than, or expressed
+      // differently from, the renderer's threshold the two would disagree and
+      // the composition would stall.
+      long demandedItemTimeUs =
+        Math.round((decodingTimeUs - compositionStartTimeUs) * item.getRate());
+      if (itemCurrentTimeUs - startTimeUs < demandedItemTimeUs) {
         allItemsReady = false;
       }
     }

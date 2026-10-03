@@ -182,6 +182,22 @@ type VideoCompositionItemBase = {
    * The duration in seconds of the item.
    */
   duration: number;
+  /**
+   * The playback rate of the item: `1` plays the source at its native speed,
+   * `2` plays it twice as fast, `0.5` at half speed. Defaults to `1`.
+   *
+   * The mapping is `source = startTime + (t - compositionStartTime) * rate`,
+   * so the item covers `duration * rate` seconds of source material while
+   * still occupying exactly `duration` seconds of the composition timeline
+   * and still emitting `duration * frameRate` exported frames.
+   *
+   * Frames are decoded at source rate and the superseded ones are dropped, so
+   * playback faster than `1` is bounded by how fast the decoder can decode.
+   *
+   * Implemented for video items only -- an item's audio track always plays at
+   * `1x`, so audio and video drift apart at a rate other than `1`.
+   */
+  rate?: number;
 };
 
 /**

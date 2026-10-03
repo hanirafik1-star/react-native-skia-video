@@ -215,7 +215,8 @@ public class VideoCompositionItemDecoder extends MediaCodec.Callback {
     }
     boolean outputEOS = (info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0;
     boolean sampleOutOfBounds =
-      info.presentationTimeUs > TimeHelpers.secToUs(item.getStartTime() + item.getDuration());
+      info.presentationTimeUs >
+        TimeHelpers.secToUs(item.getStartTime() + item.getDuration() * item.getRate());
     boolean sampleBeforeStartTime =
       info.presentationTimeUs < TimeHelpers.secToUs(item.getStartTime());
 
@@ -274,27 +275,56 @@ public class VideoCompositionItemDecoder extends MediaCodec.Callback {
     long compositionStartTimeUs = TimeHelpers.secToUs(item.getCompositionStartTime());
     long startTimeUs = TimeHelpers.secToUs(item.getStartTime());
 
-    List<Frame> framesToRenders = new ArrayList<>();
+    // The composition time maps into the source domain scaled by the item rate:
+    // `source = startTime + (t - compositionStartTime) * rate`. This expression
+    // must stay identical to the readiness gate in
+    // VideoCompositionFramesExtractorSync.checkIfFrameDecoded, which waits for
+    // the decoder to reach exactly this source time. If the two disagree the
+    // gate opens early and the composition stalls.
+    long sourceTimeUs =
+      Math.round((compositionTimeUs - compositionStartTimeUs) * item.getRate());
+
+    // DROP-MODE. At a rate other than 1 -- or at rate 1 with a source faster
+    // than the export frame rate -- more than one decoded frame becomes eligible
+    // within a single composition time step. Release only the NEWEST eligible
+    // frame to the surface and hand the superseded ones straight back to the
+    // free pool without rendering them. That keeps the number of frames
+    // rendered per composition time step at exactly 1 for every rate, which is
+    // what VideoCompositionFramesExtractorSync.resolveIfReady's timestamp
+    // identity check depends on. Releasing them all would break that check and
+    // hang the export.
+    Frame frameToRender = null;
+    List<Frame> eligibleFrames = new ArrayList<>();
     for (Frame frame : pendingFrames) {
-      if (frame.presentationTimeUs - startTimeUs <= compositionTimeUs - compositionStartTimeUs || !hasRenderedFrame) {
-        framesToRenders.add(frame);
+      if (frame.presentationTimeUs - startTimeUs <= sourceTimeUs || !hasRenderedFrame) {
         hasRenderedFrame = true;
+        eligibleFrames.add(frame);
+        if (frameToRender == null ||
+          frame.presentationTimeUs > frameToRender.presentationTimeUs) {
+          frameToRender = frame;
+        }
       }
     }
-    if (framesToRenders.isEmpty()) {
+    if (frameToRender == null) {
       return null;
     }
-    framesToRenders.forEach(frame -> {
+    final Frame renderFrame = frameToRender;
+
+    eligibleFrames.forEach(frame -> {
       try {
-        codec.releaseOutputBuffer(frame.outputBufferIndex, true);
+        // Render ONLY the frame we selected. Superseded frames are released with
+        // render = false: the buffer goes back to the codec for reuse but never
+        // reaches the surface, so the texture advances exactly one step per
+        // composition time step.
+        codec.releaseOutputBuffer(frame.outputBufferIndex, frame == renderFrame);
       } catch (Throwable e) {
         return;
       }
     });
-    freeFrames.addAll(framesToRenders);
-    pendingFrames.removeAll(framesToRenders);
+    freeFrames.addAll(eligibleFrames);
+    pendingFrames.removeAll(eligibleFrames);
 
-    return framesToRenders.get(framesToRenders.size() - 1).presentationTimeUs;
+    return renderFrame.presentationTimeUs;
   }
 
   /**
@@ -307,7 +337,8 @@ public class VideoCompositionItemDecoder extends MediaCodec.Callback {
     pendingFrames.clear();
     codec.flush();
     long itemTime = time - TimeHelpers.secToUs(item.getCompositionStartTime());
-    long seekTime = TimeHelpers.secToUs(item.getStartTime()) + Math.max(itemTime, 0);
+    long seekTime = TimeHelpers.secToUs(item.getStartTime()) +
+      Math.round(Math.max(itemTime, 0) * item.getRate());
     extractor.seekTo(seekTime, MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
     itemEndReached = false;
     hasRenderedFrame = false;

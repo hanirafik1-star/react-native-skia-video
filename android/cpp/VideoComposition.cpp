@@ -124,6 +124,18 @@ VideoComposition::fromJSIObject(jsi::Runtime& runtime,
                         (jboolean)audioEnabled);
     item->setFieldValue(itemCls->getField<jdouble>("audioVolume"), audioVolume);
 
+    // Playback rate. Read the same way as `volume` above: an absent property
+    // (or a non-number) leaves the Java field's default of 1.0 in place. A
+    // non-positive rate is ignored for the same reason -- it would make the
+    // decoder demand a source time that never advances, stalling the
+    // composition.
+    if (jsItem.hasProperty(runtime, "rate")) {
+      auto rateProp = jsItem.getProperty(runtime, "rate");
+      if (rateProp.isNumber() && rateProp.asNumber() > 0) {
+        item->setFieldValue(itemCls->getField<jdouble>("rate"), rateProp.asNumber());
+      }
+    }
+
     items->add(item);
   }
   return VideoComposition::create(duration, items);
