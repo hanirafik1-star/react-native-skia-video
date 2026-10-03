@@ -8,10 +8,30 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import javax.microedition.khronos.egl.EGLContext;
 
 public class VideoCompositionFramesExtractorSync {
+
+  /**
+   * Upper bound, in seconds, on how long {@link #decodeCompositionFrames} waits for the
+   * decoder to produce the next composition frame.
+   *
+   * Deliberately generous. This call is made once per output frame from the export
+   * worklet, and the slowest realistic case seen in practice is a software-GPU
+   * emulator, where the guest has been observed at load average 57 during export. A
+   * single-digit timeout would turn a slow-but-healthy export into a spurious
+   * failure. 60s is many orders of magnitude beyond any healthy single-frame decode
+   * (an export step is normally tens of milliseconds), so it will not fire on a slow
+   * machine, while still turning a genuine decoder stall into a reportable export
+   * error instead of an unkillable hang: {@link #release} is the only caller of
+   * {@code future.cancel}, and it can never run from a worklet blocked in
+   * {@code get()}.
+   */
+  private static final long DECODE_TIMEOUT_SECONDS = 60;
+
   private final VideoComposition composition;
 
   private final VideoCompositionDecoder decoder;
@@ -73,7 +93,18 @@ public class VideoCompositionFramesExtractorSync {
       renderedTimes.clear();
       checkIfFrameDecoded();
     });
-    return future.get();
+    try {
+      return future.get(DECODE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+    } catch (TimeoutException e) {
+      future.cancel(true);
+      throw new Exception(
+        "Video decoder stalled: no composition frame for t=" + time
+          + "s within " + DECODE_TIMEOUT_SECONDS + "s", e);
+    } catch (InterruptedException e) {
+      future.cancel(true);
+      Thread.currentThread().interrupt();
+      throw e;
+    }
   }
 
   public void release() {

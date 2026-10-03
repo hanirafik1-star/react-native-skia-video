@@ -97,8 +97,39 @@ public class GLFrameExtractor implements SurfaceTexture.OnFrameAvailableListener
         null
       );
     }
-    surfaceTexture.updateTexImage();
-    latestTimeStampNs = surfaceTexture.getTimestamp();
+    // `frameAvailable` is a single AtomicBoolean, so N coalesced
+    // `onFrameAvailable` callbacks leave exactly one pending flag while the
+    // SurfaceTexture still buffers every frame they signalled. Drain them all
+    // so the texture holds the NEWEST decoded image rather than whichever one
+    // happened to be first in the queue. `updateTexImage()` returns void, so
+    // exhaustion is detected by an unchanged `getTimestamp()`: timestamps are
+    // unique and monotonic per SurfaceTexture, so this always terminates on the
+    // newest available frame.
+    //
+    // The loop compares against the timestamp latched by the PREVIOUS
+    // ITERATION, never against the field: comparing against the field (which
+    // still holds the previous CALL's value) never terminates once a frame has
+    // been latched, because every further no-op `updateTexImage()` returns the
+    // same timestamp forever.
+    //
+    // Calling `updateTexImage()` with no buffered frame is a documented no-op
+    // (it logs and returns without touching the texture), so the extra
+    // iteration on the common single-frame path is harmless.
+    //
+    // No extra synchronisation is needed: the listener is registered without a
+    // Handler, so callbacks are delivered as Looper messages on the same thread
+    // that runs this method and cannot interleave with it.
+    long latchedNs = surfaceTexture.getTimestamp();
+    long timestampNs;
+    do {
+      surfaceTexture.updateTexImage();
+      timestampNs = surfaceTexture.getTimestamp();
+      if (timestampNs == latchedNs) {
+        break;
+      }
+      latchedNs = timestampNs;
+    } while (true);
+    latestTimeStampNs = timestampNs;
     surfaceTexture.getTransformMatrix(transformMatrix);
 
     GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, frameBuffer);
@@ -141,6 +172,14 @@ public class GLFrameExtractor implements SurfaceTexture.OnFrameAvailableListener
     }
   }
 
+  /**
+   * Get the timestamp, in nanoseconds, of the image currently held in the 2D output texture.
+   *
+   * This is the presentation timestamp of the newest frame {@link
+   * #decodeNextFrame} drained, which is what the composition decoder compares
+   * against the time it last rendered in order to confirm that the texture holds
+   * the frame it thinks it rendered. `-1` until the first successful decode.
+   */
   public long getLatestTimeStampNs() {
     return latestTimeStampNs;
   }
